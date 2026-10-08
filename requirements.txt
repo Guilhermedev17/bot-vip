@@ -1,0 +1,8 @@
+# Dependências do bot de vendas Telegram + Epague
+# Python 3.11+
+
+python-telegram-bot==21.6
+Flask==3.1.0
+requests==2.32.3
+python-dotenv==1.0.1
+gunicorn==23.0.0
