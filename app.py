@@ -177,12 +177,63 @@ def webhook_url_for_charge() -> str | None:
 # ---------------------------------------------------------------------------
 
 def handle_start(chat_id: int, name: str) -> None:
+    # /start inteligente: assinante ativo recupera o acesso sem pagar de novo.
+    # Se o banco estiver fora do ar, cai no fluxo normal de planos (vender nunca trava).
+    channel_id = (config.VIP_CHANNEL_ID or "").strip()
+    if channel_id:
+        try:
+            active_sub = db_cloud.is_active(chat_id)
+        except Exception:
+            active_sub = None
+            log.exception("Falha ao consultar assinatura no /start")
+        if active_sub:
+            _send_recovery_invite(chat_id, name, active_sub, channel_id)
+            return
     if config.WELCOME_VIDEO:
         try:
             tg.send_video(chat_id, config.WELCOME_VIDEO, caption=f"👋 Olá, {name}!")
         except Exception:
             log.exception("Falha ao enviar vídeo de boas-vindas")
     tg.send_message(chat_id, PITCH.format(name=name), reply_markup=plans_keyboard())
+
+
+def _send_recovery_invite(chat_id: int, name: str, sub: dict, channel_id: str) -> None:
+    """Gera um convite individual novo para um assinante ativo (recuperação de acesso)."""
+    try:
+        invite_link = tg.create_chat_invite_link(
+            int(channel_id),
+            name=f"vip-{chat_id}-rec"[:32],
+            member_limit=1,
+            expire_in_seconds=24 * 3600,
+        )
+    except Exception:
+        log.exception("Falha ao gerar convite de recuperação no /start")
+        invite_link = None
+
+    if not invite_link:
+        tg.send_message(
+            chat_id,
+            f"👋 Olá, {name}!\n\n"
+            "Sua assinatura está ativa, mas não consegui gerar seu link agora. "
+            "Aguarde um instante e mande /start de novo.",
+        )
+        return
+
+    try:
+        db_cloud.save_sub(chat_id, sub.get("plan_id") or "",
+                          sub.get("expires_at"), invite_link)
+    except Exception:
+        log.exception("Falha ao salvar convite de recuperação (acesso continua)")
+
+    plan = config.PLAN_MAP.get(sub.get("plan_id") or "", {})
+    plan_name = plan.get("name", "sua assinatura")
+    tg.send_message(
+        chat_id,
+        f"👋 Olá, {name}!\n\n"
+        f"✅ <b>{plan_name}</b> ativa — bom te ver de volta! 🎉\n\n"
+        f"👉 Seu novo link de acesso: {invite_link}\n\n"
+        "<i>⚠️ Este convite é pessoal, de uso único e expira em 24h.</i>",
+    )
 
 
 def handle_planos(chat_id: int) -> None:
