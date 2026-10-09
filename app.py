@@ -505,7 +505,8 @@ def telegram_webhook():
         callback_id = cq["id"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
-        _track_user(chat_id, ((cq.get("from") or {}).get("first_name")) or "")
+        cb_name = ((cq.get("from") or {}).get("first_name")) or "você"
+        _track_user(chat_id, cb_name)
         if data.startswith("plan:"):
             handle_plan(chat_id, data.split(":", 1)[1], callback_id,
                         discount=promo_discount(), discount_label=promo_label())
@@ -547,7 +548,7 @@ def telegram_webhook():
                 active_sub = None
             channel_id = (config.VIP_CHANNEL_ID or "").strip()
             if active_sub and channel_id:
-                _send_recovery_invite(chat_id, "você", active_sub, channel_id)
+                _send_recovery_invite(chat_id, cb_name, active_sub, channel_id)
             else:
                 tg.send_message(chat_id,
                                 "Você não tem assinatura ativa no momento. "
