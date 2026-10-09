@@ -1,1 +1,1 @@
-{"rewrites":[{"destination":"/api/index.py","source":"/(.*)"}]}
+{"routes":[{"src":"/(.*)","dest":"/api/index.py"}]}
