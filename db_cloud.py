@@ -24,7 +24,7 @@ import os
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _COLUMNS = ("chat_id", "plan_id", "purchased_at", "expires_at", "invite_link", "active")
 _TIMEOUT = 25
@@ -146,6 +146,19 @@ def init_schema() -> None:
     )
     _one("CREATE INDEX IF NOT EXISTS idx_payments_chat ON payments(chat_id)")
     _one("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_ext ON payments(external_id)")
+    _one(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+          chat_id       INTEGER PRIMARY KEY,
+          first_name    TEXT NOT NULL DEFAULT '',
+          first_seen    TEXT NOT NULL,
+          last_seen     TEXT NOT NULL,
+          last_nudge_at TEXT,
+          nudge_count   INTEGER NOT NULL DEFAULT 0,
+          reachable     INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
     # migração idempotente: coluna de avisos de vencimento já enviados ("7,3,1")
     try:
         _one("ALTER TABLE subs ADD COLUMN warned_days TEXT NOT NULL DEFAULT ''")
@@ -267,3 +280,49 @@ def mark_warned(chat_id: int, day: int) -> None:
     warned.add(str(day))
     _one("UPDATE subs SET warned_days = ? WHERE chat_id = ?",
          (",".join(sorted(warned)), chat_id))
+
+
+def track_user(chat_id: int, first_name: str = "") -> None:
+    """Registra/atualiza um visitante (base das campanhas de nudge). Idempotente."""
+    _one(
+        """INSERT INTO users (chat_id, first_name, first_seen, last_seen,
+                              last_nudge_at, nudge_count, reachable)
+           VALUES (?, ?, ?, ?, NULL, 0, 1)
+           ON CONFLICT(chat_id) DO UPDATE SET
+             first_name=excluded.first_name,
+             last_seen=excluded.last_seen""",
+        (chat_id, first_name or "", _now_iso(), _now_iso()),
+    )
+
+
+def nudge_candidates(limit: int = 50, min_interval_hours: int = 48) -> list[dict]:
+    """Visitantes que NUNCA compraram, alcançáveis e sem nudge recente.
+
+    Quem já pagou alguma vez sai da lista (entra no ciclo de retenção).
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=min_interval_hours)).isoformat()
+    rows = _one(
+        """SELECT u.chat_id, u.first_name, u.nudge_count FROM users u
+           WHERE u.reachable = 1
+             AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.chat_id = u.chat_id)
+             AND (u.last_nudge_at IS NULL OR u.last_nudge_at <= ?)
+           ORDER BY u.last_nudge_at NULLS FIRST, u.first_seen
+           LIMIT ?""",
+        (cutoff, limit),
+    )
+    return [
+        {"chat_id": _from_hrana_val(r[0]),
+         "first_name": _from_hrana_val(r[1]) or "",
+         "nudge_count": _from_hrana_val(r[2]) or 0}
+        for r in rows
+    ]
+
+
+def mark_nudged(chat_id: int) -> None:
+    _one("UPDATE users SET last_nudge_at = ?, nudge_count = nudge_count + 1"
+         " WHERE chat_id = ?", (_now_iso(), chat_id))
+
+
+def mark_unreachable(chat_id: int) -> None:
+    """Bot bloqueado ou chat inválido: para de tentar."""
+    _one("UPDATE users SET reachable = 0 WHERE chat_id = ?", (chat_id,))

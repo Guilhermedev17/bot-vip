@@ -491,12 +491,38 @@ def telegram_webhook():
         callback_id = cq["id"]
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
+        _track_user(chat_id, ((cq.get("from") or {}).get("first_name")) or "")
         if data.startswith("plan:"):
             handle_plan(chat_id, data.split(":", 1)[1], callback_id,
                         discount=promo_discount(), discount_label=promo_label())
         elif data.startswith("renew:"):
             handle_plan(chat_id, data.split(":", 1)[1], callback_id,
                         discount=RENEW_DISCOUNT, discount_label="desconto de renovação 10% OFF")
+        elif data.startswith("nudge:"):
+            # "QUERO X% OFF" do nudge → mostra os planos com o desconto aplicado
+            try:
+                pct = int(data.split(":", 1)[1])
+            except (ValueError, IndexError):
+                pct = 10
+            disc = min(max(pct, 1), 50) / 100
+            tg.answer_callback(callback_id)
+            tg.send_message(
+                chat_id,
+                f"🔥 <b>{pct}% OFF liberado!</b> Escolha seu plano com o desconto aplicado 👇",
+                reply_markup=plans_keyboard(discount=disc, prefix=f"npbuy:{pct}"),
+            )
+        elif data.startswith("npbuy:"):
+            # "npbuy:{pct}:{plan_id}" → gera a cobrança com o desconto do nudge
+            parts = data.split(":")
+            try:
+                pct = int(parts[1])
+                plan_id = parts[2]
+            except (ValueError, IndexError):
+                tg.answer_callback(callback_id)
+                return jsonify({"ok": True})
+            disc = min(max(pct, 1), 50) / 100
+            handle_plan(chat_id, plan_id, callback_id,
+                        discount=disc, discount_label=f"oferta {pct}% OFF")
         elif data.startswith("v:"):
             handle_verify(chat_id, data.split(":", 1)[1], callback_id)
         elif data.startswith("c:"):
@@ -515,6 +541,7 @@ def telegram_webhook():
         return jsonify({"ok": True})
 
     name = ((msg.get("from") or {}).get("first_name")) or "visitante"
+    _track_user(chat_id, name)
     if text in ("/start", "/start@vip2026oficialbot"):
         handle_start(chat_id, name)
     elif text.startswith("/planos"):
@@ -635,6 +662,75 @@ def send_expiry_warnings() -> dict:
     return {"warned": warned, "failed": failed}
 
 
+# ---------------------------------------------------------------------------
+# Nudges: cutucadas promocionais pra quem nunca comprou (a cada ~2 dias,
+# até assinar). Banco de copys agressivas com {name} e {discount}.
+# ---------------------------------------------------------------------------
+
+NUDGE_COPIES = [
+    "😤 {name}, ainda tá de fora? Enquanto você pensa, o acervo do VIP 2026 só cresce... E hoje eu liberei {discount}% OFF só pra você. 👇",
+    "🔥 {name}, vou ser direto: você já viu o que tá perdendo? Conteúdo novo todo dia + {discount}% OFF agora. Não deixa pra depois. 👇",
+    "👀 Ei, {name}... quantos VIPs você já pagou e se arrependeu? Aqui é diferente — e com {discount}% OFF fica fácil tirar a prova. 👇",
+    "⏳ {name}, essa condição de {discount}% OFF não dura pra sempre. O VIP 2026 tá te esperando. 👇",
+    "💎 {name}, quem tá dentro não sai mais. Quem tá fora continua perdendo conteúdo novo todo dia. {discount}% OFF pra você entrar agora. 👇",
+    "🚨 Última chamada, {name}: {discount}% OFF no VIP 2026. Amanhã pode ser tarde — e mais caro. 👇",
+    "😏 {name}, o pessoal que entrou essa semana já tá aproveitando tudo. E você aí de fora, com {discount}% OFF na mão... 👇",
+    "🔥 Chega de enrolar, {name}: {discount}% OFF + acesso imediato + acervo novo todo dia. É agora. 👇",
+]
+
+# Descontos rotacionados por nudge (10% → 15% → 12% → 15% ...).
+NUDGE_DISCOUNTS = [10, 15, 12, 15]
+NUDGE_INTERVAL_HOURS = 48
+NUDGE_BATCH_LIMIT = 50
+
+
+def send_nudges() -> dict:
+    """Dispara ofertas pra visitantes que nunca compraram.
+
+    Roda no cron diário. Cada um recebe no máximo 1 nudge a cada 48h,
+    com copy e desconto rotacionados. Quem assinar sai da lista
+    automaticamente (tem pagamento registrado). Quem bloquear o bot
+    é marcado como inalcançável e não recebe mais.
+    """
+    try:
+        db_cloud.init_schema()
+        candidates = db_cloud.nudge_candidates(
+            limit=NUDGE_BATCH_LIMIT, min_interval_hours=NUDGE_INTERVAL_HOURS)
+    except Exception:
+        log.exception("Falha ao buscar candidatos a nudge")
+        return {"nudged": 0, "failed": ["db_error"]}
+
+    nudged, failed = 0, []
+    for u in candidates:
+        n = u["nudge_count"]
+        discount = NUDGE_DISCOUNTS[n % len(NUDGE_DISCOUNTS)]
+        copy = NUDGE_COPIES[n % len(NUDGE_COPIES)]
+        name = u["first_name"] or "você"
+        kb = tg.inline_keyboard([[(f"🔥 QUERO {discount}% OFF", f"nudge:{discount}")]])
+        try:
+            tg.send_message(u["chat_id"], copy.format(name=name, discount=discount),
+                            reply_markup=kb)
+            db_cloud.mark_nudged(u["chat_id"])
+            nudged += 1
+        except Exception:
+            log.exception(f"Falha no nudge pra {u['chat_id']}")
+            try:
+                db_cloud.mark_unreachable(u["chat_id"])
+            except Exception:
+                pass
+            failed.append(u["chat_id"])
+    return {"nudged": nudged, "failed": failed}
+
+
+def _track_user(chat_id: int, name: str) -> None:
+    """Registra o visitante (base das campanhas). Nunca quebra o fluxo."""
+    try:
+        db_cloud.init_schema()
+        db_cloud.track_user(chat_id, name or "")
+    except Exception:
+        log.exception("Falha ao registrar visitante")
+
+
 def expire_subscriptions() -> dict:
     """Rotina diária (Parte 4): remove do canal quem teve o plano vencido.
 
@@ -700,7 +796,8 @@ def cron_expire():
         log.exception("Falha ao inicializar schema no cron")
     warnings = send_expiry_warnings()
     result = expire_subscriptions()
-    return jsonify({"ok": True, "warnings": warnings, **result})
+    nudges = send_nudges()
+    return jsonify({"ok": True, "warnings": warnings, "nudges": nudges, **result})
 
 
 if __name__ == "__main__":
