@@ -244,14 +244,11 @@ def get_payments(chat_id: int, limit: int = 5) -> list[dict]:
         " WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
         (chat_id, limit),
     )
-    out = []
-    for r in rows:
-        out.append({
-            "plan_id": _from_hrana_val(r[0]),
-            "amount_cents": _from_hrana_val(r[1]) or 0,
-            "paid_at": _from_hrana_val(r[2]),
-        })
-    return out
+    # nota: _pipeline já converte os valores; não converter de novo
+    return [
+        {"plan_id": r[0], "amount_cents": r[1] or 0, "paid_at": r[2]}
+        for r in rows
+    ]
 
 
 def list_active_expiring() -> list[dict]:
@@ -261,21 +258,18 @@ def list_active_expiring() -> list[dict]:
         " WHERE active = 1 AND expires_at IS NOT NULL AND expires_at > ?",
         (_now_iso(),),
     )
-    out = []
-    for r in rows:
-        out.append({
-            "chat_id": _from_hrana_val(r[0]),
-            "plan_id": _from_hrana_val(r[1]),
-            "expires_at": _from_hrana_val(r[2]),
-            "warned_days": _from_hrana_val(r[3]) or "",
-        })
-    return out
+    # nota: _pipeline já converte os valores; não converter de novo
+    return [
+        {"chat_id": r[0], "plan_id": r[1],
+         "expires_at": r[2], "warned_days": r[3] or ""}
+        for r in rows
+    ]
 
 
 def mark_warned(chat_id: int, day: int) -> None:
     """Marca o aviso de N dias como enviado (não repete)."""
     rows = _one("SELECT warned_days FROM subs WHERE chat_id = ?", (chat_id,))
-    current = _from_hrana_val(rows[0][0]) if rows else ""
+    current = rows[0][0] if rows else ""  # _pipeline já converte; sem conversão dupla
     warned = {w for w in str(current or "").split(",") if w}
     warned.add(str(day))
     _one("UPDATE subs SET warned_days = ? WHERE chat_id = ?",
@@ -310,10 +304,9 @@ def nudge_candidates(limit: int = 50, min_interval_hours: int = 48) -> list[dict
            LIMIT ?""",
         (cutoff, limit),
     )
+    # nota: _pipeline já converte os valores; não converter de novo
     return [
-        {"chat_id": _from_hrana_val(r[0]),
-         "first_name": _from_hrana_val(r[1]) or "",
-         "nudge_count": _from_hrana_val(r[2]) or 0}
+        {"chat_id": r[0], "first_name": r[1] or "", "nudge_count": r[2] or 0}
         for r in rows
     ]
 
