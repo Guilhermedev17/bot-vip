@@ -247,6 +247,61 @@ def handle_planos(chat_id: int) -> None:
     tg.send_message(chat_id, "\n\n".join(lines), reply_markup=plans_keyboard())
 
 
+def handle_status(chat_id: int, name: str) -> None:
+    """/status — mostra a assinatura atual do usuário (plano e vencimento)."""
+    try:
+        sub = db_cloud.is_active(chat_id)
+    except Exception:
+        sub = None
+        log.exception("Falha ao consultar assinatura no /status")
+    if not sub:
+        tg.send_message(
+            chat_id,
+            "📊 <b>Minha assinatura</b>\n\n"
+            "Você não tem uma assinatura ativa no momento.\n\n"
+            "Use /start para ver os planos. 👋",
+        )
+        return
+    plan = config.PLAN_MAP.get(sub.get("plan_id") or "", {})
+    plan_name = plan.get("name", "VIP")
+    exp = sub.get("expires_at")
+    if exp:
+        try:
+            dt = datetime.fromisoformat(exp)
+            days_left = max(0, (dt - datetime.now(timezone.utc)).days)
+            validity = f"⏳ Vence em <b>{days_left} dia(s)</b>."
+        except Exception:
+            validity = "⏳ Assinatura por tempo limitado."
+    else:
+        validity = "♾️ Acesso <b>vitalício</b>."
+    tg.send_message(
+        chat_id,
+        "📊 <b>Minha assinatura</b>\n\n"
+        f"💎 Plano: <b>{plan_name}</b>\n"
+        f"{validity}\n\n"
+        "Perdeu o acesso ao canal? Mande /start que eu gero um link novo. 👍",
+    )
+
+
+def handle_suporte(chat_id: int, name: str) -> None:
+    """/suporte — direciona para o atendimento (SUPPORT_CONTACT)."""
+    contact = (config.SUPPORT_CONTACT or "").strip()
+    if contact:
+        tg.send_message(
+            chat_id,
+            "💬 <b>Suporte</b>\n\n"
+            f"Fale com a gente: {contact}\n\n"
+            "Descreva seu problema que respondemos o quanto antes. 👍",
+        )
+    else:
+        tg.send_message(
+            chat_id,
+            "💬 <b>Suporte</b>\n\n"
+            "Nosso atendimento está sendo configurado.\n"
+            "Tente novamente em breve. 🙏",
+        )
+
+
 def handle_plan(chat_id: int, plan_id: str, callback_id: str) -> None:
     tg.answer_callback(callback_id)
     plan = config.PLAN_MAP.get(plan_id)
@@ -383,6 +438,10 @@ def telegram_webhook():
         handle_start(chat_id, name)
     elif text.startswith("/planos"):
         handle_planos(chat_id)
+    elif text.startswith("/status"):
+        handle_status(chat_id, name)
+    elif text.startswith("/suporte"):
+        handle_suporte(chat_id, name)
 
     return jsonify({"ok": True})
 

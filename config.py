@@ -51,6 +51,10 @@ CRON_SECRET = os.getenv("CRON_SECRET", "")
 # Link de convite do grupo/canal VIP, enviado após o pagamento confirmado.
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "")
 
+# Contato de suporte exibido no comando /suporte (ex: @seu_usuario ou link).
+# Vazio = mensagem genérica de "em breve".
+SUPPORT_CONTACT = os.getenv("SUPPORT_CONTACT", "")
+
 # --- Boas-vindas ---
 # Vídeo de apresentação enviado no /start antes do pitch (como o CS VIP 2 faz).
 # Aceita file_id do Telegram, URL pública ou caminho de arquivo local.
