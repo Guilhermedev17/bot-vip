@@ -1,10 +1,10 @@
 """App Flask em modo webhook — produção (Vercel / Render / qualquer host).
 
-Arquitetura 100% stateless (sem banco de dados): o mapeamento
+Arquitetura com banco de dados na nuvem (Turso): o mapeamento
 cobrança -> usuário viaja dentro do próprio ``external_id`` da Epague
-(``vip2026-{chat_id}-{plan_id}-{rand}``), que o webhook devolve.
-Os botões consultam a Epague de novo pelo charge_id, então nada
-precisa ser persistido em disco.
+(``vip2026-{chat_id}-{plan_id}-{rand}``), que o webhook devolve, e a
+assinatura é registrada na tabela `subs` (quem comprou, qual plano,
+quando vence). Os botões consultam a Epague de novo pelo charge_id.
 
 Endpoints:
   POST /telegram        <- updates do Telegram (configure via setWebhook)
@@ -20,10 +20,12 @@ import base64
 import logging
 import re
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from flask import Flask, jsonify, request
 
 import config
+import db_cloud
 import tg
 from epague import (
     SIGNATURE_HEADER,
@@ -90,14 +92,65 @@ def payment_keyboard(charge_id: str) -> dict:
     )
 
 
-def release_message(plan_id: str) -> str:
+def plan_expires_at(plan_id: str) -> str | None:
+    """Calcula o vencimento ISO 8601 UTC a partir dos dias do plano.
+
+    Retorna None para plano vitalício (sem vencimento).
+    """
     plan = config.PLAN_MAP.get(plan_id, {})
-    return (
-        "✅ <b>Pagamento confirmado!</b>\n\n"
-        f"Seu acesso ao <b>{plan.get('name', 'plano')}</b> foi liberado. "
-        "Bem-vindo(a)! 🎉\n\n"
-        f"👉 Acesse aqui: {config.VIP_INVITE_LINK}"
+    days = plan.get("days", 0)
+    if not days:
+        return None
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat(
+        timespec="seconds"
     )
+
+
+def release_access(chat_id: int, plan_id: str) -> None:
+    """Libera o acesso após pagamento confirmado.
+
+    1. Gera um convite INDIVIDUAL de uso único pro canal (se o bot for
+       admin e VIP_CHANNEL_ID estiver configurado).
+    2. Registra a assinatura no banco (pra re-liberação e expiração).
+    3. Envia a mensagem de liberação com o convite.
+
+    Se o banco ou a geração do convite falhar, a liberação continua com
+    o link estático de fallback — vender nunca pode travar.
+    """
+    invite_link = None
+    channel_id = (config.VIP_CHANNEL_ID or "").strip()
+    if channel_id:
+        try:
+            invite_link = tg.create_chat_invite_link(
+                int(channel_id),
+                name=f"vip-{chat_id}-{plan_id}"[:32],
+                member_limit=1,
+                expire_in_seconds=24 * 3600,
+            )
+        except Exception:
+            log.exception("Falha ao gerar convite individual; usando link estático")
+
+    try:
+        db_cloud.init_schema()
+        db_cloud.save_sub(chat_id, plan_id, plan_expires_at(plan_id), invite_link)
+    except Exception:
+        log.exception("Falha ao registrar assinatura no banco (liberação continua)")
+
+    plan = config.PLAN_MAP.get(plan_id, {})
+    plan_name = plan.get("name", "plano")
+    days = plan.get("days", 0)
+    link = invite_link or config.VIP_INVITE_LINK
+    text = (
+        "✅ <b>Pagamento confirmado!</b>\n\n"
+        f"Seu acesso ao <b>{plan_name}</b> foi liberado. "
+        "Bem-vindo(a)! 🎉\n\n"
+        f"👉 Acesse aqui: {link}"
+    )
+    if days:
+        text += f"\n\n<i>⏳ Seu acesso vale por {days} dias.</i>"
+    if invite_link:
+        text += "\n<i>⚠️ Este convite é pessoal e intransferível.</i>"
+    tg.send_message(chat_id, text)
 
 
 def parse_external_id(external_id: str) -> tuple[int, str] | tuple[None, None]:
@@ -195,7 +248,7 @@ def handle_verify(chat_id: int, charge_id: str, callback_id: str) -> None:
     status = str(info.get("status", "")).lower()
     if status in config.PAID_STATUSES:
         _, plan_id = parse_external_id(info.get("external_id", ""))
-        tg.send_message(chat_id, release_message(plan_id or ""))
+        release_access(chat_id, plan_id or "")
     else:
         tg.send_message(
             chat_id,
@@ -316,9 +369,9 @@ def epague_webhook():
 
     if status in config.PAID_STATUSES:
         try:
-            tg.send_message(chat_id, release_message(plan_id or ""))
+            release_access(chat_id, plan_id or "")
         except Exception:
-            log.exception("Falha ao enviar mensagem de liberação no Telegram")
+            log.exception("Falha ao liberar acesso no Telegram")
 
     return jsonify({"ok": True})
 
