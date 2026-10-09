@@ -427,9 +427,67 @@ def epague_webhook():
     return jsonify({"ok": True})
 
 
+def expire_subscriptions() -> dict:
+    """Rotina diária (Parte 4): remove do canal quem teve o plano vencido.
+
+    Para cada assinatura ativa com prazo estourado:
+    1. Expulsa do canal (ban + unban imediato = sai sem ficar bloqueado,
+       pode comprar de novo quando quiser).
+    2. Marca como inativa no banco.
+
+    Nunca trava por causa de um usuário: falha individual é registrada
+    e a faxina continua pros demais.
+    """
+    try:
+        db_cloud.init_schema()
+        expired = db_cloud.list_expired()
+    except Exception:
+        log.exception("Falha ao buscar assinaturas vencidas")
+        return {"checked": 0, "removed": 0, "failed": ["db_error"]}
+
+    channel_id = (config.VIP_CHANNEL_ID or "").strip()
+    removed, failed = 0, []
+    for sub in expired:
+        user_id = sub["chat_id"]
+        ok = True
+        if channel_id:
+            try:
+                tg.ban_chat_member(int(channel_id), user_id)
+            except Exception:
+                log.exception(f"Falha ao banir {user_id} do canal")
+                ok = False
+            try:
+                tg.unban_chat_member(int(channel_id), user_id)
+            except Exception:
+                log.exception(f"Falha ao desbanir {user_id} do canal")
+                ok = False
+        try:
+            db_cloud.deactivate(user_id)
+        except Exception:
+            log.exception(f"Falha ao desativar {user_id} no banco")
+            ok = False
+        if ok:
+            removed += 1
+        else:
+            failed.append(user_id)
+        log.info(f"Assinatura vencida removida: chat_id={user_id} plano={sub.get('plan_id')}")
+    return {"checked": len(expired), "removed": removed, "failed": failed}
+
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
+
+
+@app.get("/cron/expire")
+def cron_expire():
+    """Endpoint do cron diário da Vercel. Protegido por CRON_SECRET
+    (a Vercel envia Authorization: Bearer <CRON_SECRET> automaticamente)."""
+    expected = (config.CRON_SECRET or "").strip()
+    if not expected or request.headers.get("Authorization") != f"Bearer {expected}":
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    result = expire_subscriptions()
+    return jsonify({"ok": True, **result})
 
 
 if __name__ == "__main__":

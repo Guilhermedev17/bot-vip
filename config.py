@@ -42,6 +42,11 @@ TURSO_TOKEN = os.getenv("TURSO_TOKEN", "")
 # O bot precisa ser ADMINISTRADOR do canal pra isso funcionar.
 VIP_CHANNEL_ID = os.getenv("VIP_CHANNEL_ID", "")
 
+# Segredo do cron diário de expiração (endpoint /cron/expire).
+# A Vercel envia automaticamente "Authorization: Bearer <CRON_SECRET>"
+# nas chamadas do cron. Vazio = endpoint recusado (fail-safe).
+CRON_SECRET = os.getenv("CRON_SECRET", "")
+
 # --- Acesso VIP ---
 # Link de convite do grupo/canal VIP, enviado após o pagamento confirmado.
 VIP_INVITE_LINK = os.getenv("VIP_INVITE_LINK", "")
