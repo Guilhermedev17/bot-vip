@@ -115,8 +115,9 @@ def plan_expires_at(plan_id: str) -> str | None:
 def release_access(chat_id: int, plan_id: str) -> None:
     """Libera o acesso após pagamento confirmado.
 
-    1. Gera um convite INDIVIDUAL de uso único pro canal (se o bot for
-       admin e VIP_CHANNEL_ID estiver configurado).
+    1. Gera um convite com PEDIDO de entrada (join request) pro canal.
+       A entrada só é aprovada se o usuário tiver assinatura ativa —
+       link compartilhado não adianta: quem não pagou é recusado.
     2. Registra a assinatura no banco (pra re-liberação e expiração).
     3. Envia a mensagem de liberação com o convite.
 
@@ -130,11 +131,10 @@ def release_access(chat_id: int, plan_id: str) -> None:
             invite_link = tg.create_chat_invite_link(
                 int(channel_id),
                 name=f"vip-{chat_id}-{plan_id}"[:32],
-                member_limit=1,
-                expire_in_seconds=24 * 3600,
+                creates_join_request=True,
             )
         except Exception:
-            log.exception("Falha ao gerar convite individual; usando link estático")
+            log.exception("Falha ao gerar convite; usando link estático")
 
     try:
         db_cloud.init_schema()
@@ -145,17 +145,25 @@ def release_access(chat_id: int, plan_id: str) -> None:
     plan = config.PLAN_MAP.get(plan_id, {})
     plan_name = plan.get("name", "plano")
     days = plan.get("days", 0)
-    link = invite_link or config.VIP_INVITE_LINK
-    text = (
-        "✅ <b>Pagamento confirmado!</b>\n\n"
-        f"Seu acesso ao <b>{plan_name}</b> foi liberado. "
-        "Bem-vindo(a)! 🎉\n\n"
-        f"👉 Acesse aqui: {link}"
-    )
+    if invite_link:
+        text = (
+            "✅ <b>Pagamento confirmado!</b>\n\n"
+            f"Seu acesso ao <b>{plan_name}</b> foi liberado. "
+            "Bem-vindo(a)! 🎉\n\n"
+            f"👉 Toque no link e confirme a solicitação de entrada: {invite_link}\n"
+            "<i>Eu aprovo na hora, automaticamente. ✅</i>"
+        )
+    else:
+        # fallback raríssimo: sem link gerado, o /start resolve via recuperação
+        text = (
+            "✅ <b>Pagamento confirmado!</b>\n\n"
+            f"Seu acesso ao <b>{plan_name}</b> foi liberado. "
+            "Bem-vindo(a)! 🎉\n\n"
+            "Não consegui gerar seu link de acesso agora — "
+            "mande /start aqui que eu gero na hora. 👍"
+        )
     if days:
         text += f"\n\n<i>⏳ Seu acesso vale por {days} dias.</i>"
-    if invite_link:
-        text += "\n<i>⚠️ Este convite é pessoal e intransferível.</i>"
     tg.send_message(chat_id, text)
 
 
@@ -221,13 +229,16 @@ def handle_start(chat_id: int, name: str) -> None:
 
 
 def _send_recovery_invite(chat_id: int, name: str, sub: dict, channel_id: str) -> None:
-    """Gera um convite individual novo para um assinante ativo (recuperação de acesso)."""
+    """Gera um convite novo para um assinante ativo (recuperação de acesso).
+
+    O convite exige pedido de entrada: só quem tem assinatura ativa é
+    aprovado — link compartilhado com não-pagante é recusado.
+    """
     try:
         invite_link = tg.create_chat_invite_link(
             int(channel_id),
             name=f"vip-{chat_id}-rec"[:32],
-            member_limit=1,
-            expire_in_seconds=24 * 3600,
+            creates_join_request=True,
         )
     except Exception:
         log.exception("Falha ao gerar convite de recuperação no /start")
@@ -254,8 +265,8 @@ def _send_recovery_invite(chat_id: int, name: str, sub: dict, channel_id: str) -
         chat_id,
         f"👋 Olá, {name}!\n\n"
         f"✅ <b>{plan_name}</b> ativa — bom te ver de volta! 🎉\n\n"
-        f"👉 Seu novo link de acesso: {invite_link}\n\n"
-        "<i>⚠️ Este convite é pessoal, de uso único e expira em 24h.</i>",
+        f"👉 Toque no link e confirme a solicitação de entrada: {invite_link}\n"
+        "<i>Eu aprovo na hora, automaticamente. ✅</i>",
     )
 
 
@@ -320,11 +331,9 @@ def handle_status(chat_id: int, name: str) -> None:
                 amt = format_price(h.get("amount_cents") or 0)
                 lines.append(f"• {pname} — {amt} ({when})".strip())
             text += "\n\n📜 <b>Últimas compras:</b>\n" + "\n".join(lines)
-        link = (config.VIP_INVITE_LINK or "").strip()
-        if link:
-            text += f"\n\n👉 <b>Canal VIP:</b> {link}"
-        text += "\n\nPerdeu o acesso ao canal? Mande /start que eu gero um link novo. 👍"
-    tg.send_message(chat_id, text)
+        text += "\n\nPerdeu o acesso ao canal? Toque abaixo que eu gero seu link. 👇"
+        kb = tg.inline_keyboard([[("🎟️ Gerar meu link de acesso", "getlink")]])
+    tg.send_message(chat_id, text, reply_markup=kb if sub else None)
 
 
 def handle_suporte(chat_id: int, name: str) -> None:
@@ -486,6 +495,11 @@ def telegram_webhook():
 
     update = request.get_json(force=True, silent=True) or {}
 
+    # pedidos de entrada no canal (convites com join request)
+    if "chat_join_request" in update:
+        handle_join_request(update)
+        return jsonify({"ok": True})
+
     if "callback_query" in update:
         cq = update["callback_query"]
         callback_id = cq["id"]
@@ -523,6 +537,21 @@ def telegram_webhook():
             disc = min(max(pct, 1), 50) / 100
             handle_plan(chat_id, plan_id, callback_id,
                         discount=disc, discount_label=f"oferta {pct}% OFF")
+        elif data == "getlink":
+            # botão do /status: gera link de acesso (com verificação na entrada)
+            tg.answer_callback(callback_id)
+            try:
+                db_cloud.init_schema()
+                active_sub = db_cloud.is_active(chat_id)
+            except Exception:
+                active_sub = None
+            channel_id = (config.VIP_CHANNEL_ID or "").strip()
+            if active_sub and channel_id:
+                _send_recovery_invite(chat_id, "você", active_sub, channel_id)
+            else:
+                tg.send_message(chat_id,
+                                "Você não tem assinatura ativa no momento. "
+                                "Use /start para ver os planos. 👋")
         elif data.startswith("v:"):
             handle_verify(chat_id, data.split(":", 1)[1], callback_id)
         elif data.startswith("c:"):
@@ -729,6 +758,44 @@ def _track_user(chat_id: int, name: str) -> None:
         db_cloud.track_user(chat_id, name or "")
     except Exception:
         log.exception("Falha ao registrar visitante")
+
+
+def handle_join_request(update: dict) -> None:
+    """Aprova/recusa pedidos de entrada no canal VIP.
+
+    Só aprova quem tem assinatura ativa no banco. Link compartilhado
+    com quem não pagou é recusado automaticamente — fecha o furo do
+    "manda o link pro amigo".
+    """
+    req = update.get("chat_join_request") or {}
+    chat = req.get("chat") or {}
+    user = req.get("from") or {}
+    channel_id = chat.get("id")
+    user_id = user.get("id")
+    if not channel_id or not user_id:
+        return
+    # segurança: só processa pedidos pro nosso canal
+    try:
+        expected = int((config.VIP_CHANNEL_ID or "0").strip() or 0)
+    except (ValueError, TypeError):
+        return
+    if int(channel_id) != expected:
+        return
+    try:
+        db_cloud.init_schema()
+        active = db_cloud.is_active(user_id)
+    except Exception:
+        log.exception("Falha ao verificar assinatura no join request")
+        active = None
+    try:
+        if active:
+            tg.approve_join_request(channel_id, user_id)
+            log.info("Entrada aprovada no VIP: %s", user_id)
+        else:
+            tg.decline_join_request(channel_id, user_id)
+            log.info("Entrada recusada (sem assinatura ativa): %s", user_id)
+    except Exception:
+        log.exception("Falha ao processar join request de %s", user_id)
 
 
 def expire_subscriptions() -> dict:

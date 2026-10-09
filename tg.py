@@ -88,22 +88,37 @@ def create_chat_invite_link(
     name: str | None = None,
     member_limit: int = 1,
     expire_in_seconds: int = 86400,
+    creates_join_request: bool = False,
 ) -> str:
-    """Cria um link de convite individual (padrão: 1 uso, expira em 24h).
+    """Cria um link de convite.
 
-    Exige que o bot seja administrador do canal/grupo com permissão
-    de convidar. Retorna a URL do convite (ex: https://t.me/+AbCdEf...).
+    Padrão: individual (1 uso, expira em 24h).
+    Com creates_join_request=True: o link gera um PEDIDO de entrada em vez de
+    liberar direto — o bot aprova/recusa via approve/decline_join_request.
+    (Não combina member_limit com join request: a API do Telegram não permite.)
+    Exige que o bot seja administrador do canal/grupo com permissão de convidar.
     """
     import time
 
-    payload: dict = {
-        "chat_id": chat_id,
-        "member_limit": member_limit,
-        "expire_date": int(time.time()) + expire_in_seconds,
-    }
+    payload: dict = {"chat_id": chat_id}
+    if creates_join_request:
+        payload["creates_join_request"] = True
+    else:
+        payload["member_limit"] = member_limit
+        payload["expire_date"] = int(time.time()) + expire_in_seconds
     if name:
         payload["name"] = name[:32]  # Telegram limita o nome do convite a 32 chars
     return _post("createChatInviteLink", payload)["invite_link"]
+
+
+def approve_join_request(chat_id: int | str, user_id: int) -> bool:
+    """Aprova um pedido de entrada no canal/grupo."""
+    return _post("approveChatJoinRequest", {"chat_id": chat_id, "user_id": user_id})
+
+
+def decline_join_request(chat_id: int | str, user_id: int) -> bool:
+    """Recusa um pedido de entrada no canal/grupo."""
+    return _post("declineChatJoinRequest", {"chat_id": chat_id, "user_id": user_id})
 
 
 def revoke_chat_invite_link(chat_id: int | str, invite_link: str) -> dict:
