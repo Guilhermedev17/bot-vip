@@ -561,6 +561,10 @@ def epague_webhook():
     if status in config.PAID_STATUSES:
         external_id = payload.get("external_id", "") or ""
         try:
+            db_cloud.init_schema()
+        except Exception:
+            log.exception("Falha ao inicializar schema (seguindo)")
+        try:
             if external_id and db_cloud.payment_exists(external_id):
                 log.info("Webhook duplicado ignorado: %s", external_id)
                 return jsonify({"ok": True, "duplicate": True})
@@ -688,6 +692,10 @@ def cron_expire():
     expected = (config.CRON_SECRET or "").strip()
     if not expected or request.headers.get("Authorization") != f"Bearer {expected}":
         return jsonify({"ok": False, "error": "unauthorized"}), 401
+    try:
+        db_cloud.init_schema()
+    except Exception:
+        log.exception("Falha ao inicializar schema no cron")
     warnings = send_expiry_warnings()
     result = expire_subscriptions()
     return jsonify({"ok": True, "warnings": warnings, **result})
