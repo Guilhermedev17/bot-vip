@@ -202,7 +202,20 @@ def handle_start(chat_id: int, name: str) -> None:
             active_sub = None
             log.exception("Falha ao consultar assinatura no /start")
         if active_sub:
-            _send_recovery_invite(chat_id, name, active_sub, channel_id)
+            # assinante ativo: se já está no canal, só confirma (sem spam de link);
+            # se não está, gera o link de recuperação.
+            if _is_channel_member(channel_id, chat_id):
+                plan = config.PLAN_MAP.get(active_sub.get("plan_id") or "", {})
+                plan_name = plan.get("name", "sua assinatura")
+                tg.send_message(
+                    chat_id,
+                    f"👋 Olá, {name}!\n\n"
+                    f"✅ Tá tudo certo — teu <b>{plan_name}</b> tá ativo e tu já tá no canal. "
+                    "Bom proveito! 🎉\n\n"
+                    "<i>Dica: /status mostra os detalhes da assinatura.</i>",
+                )
+            else:
+                _send_recovery_invite(chat_id, name, active_sub, channel_id)
             return
         try:
             old_sub = db_cloud.get_sub(chat_id)
@@ -226,6 +239,20 @@ def handle_start(chat_id: int, name: str) -> None:
             log.exception("Falha ao enviar vídeo de boas-vindas")
     tg.send_message(chat_id, promo_banner() + PITCH.format(name=name),
                     reply_markup=plans_keyboard(discount=promo_discount()))
+
+
+def _is_channel_member(channel_id: str, user_id: int) -> bool:
+    """Diz se o usuário já está dentro do canal.
+
+    Na dúvida (erro de rede), retorna False e o fluxo gera o link —
+    a verificação anti-pirataria na entrada continua valendo.
+    """
+    try:
+        m = tg.get_chat_member(int(channel_id), user_id)
+        return m.get("status") in ("member", "administrator", "creator", "restricted")
+    except Exception:
+        log.exception("Falha ao verificar membro do canal")
+        return False
 
 
 def _send_recovery_invite(chat_id: int, name: str, sub: dict, channel_id: str) -> None:

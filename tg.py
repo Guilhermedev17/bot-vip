@@ -139,3 +139,8 @@ def unban_chat_member(chat_id: int | str, user_id: int) -> dict:
         "unbanChatMember",
         {"chat_id": chat_id, "user_id": user_id, "only_if_banned": True},
     )
+
+
+def get_chat_member(chat_id: int | str, user_id: int) -> dict:
+    """Retorna o vínculo do usuário com o chat (status: member, left, kicked...)."""
+    return _post("getChatMember", {"chat_id": chat_id, "user_id": user_id})
