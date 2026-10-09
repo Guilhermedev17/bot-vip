@@ -1,10 +1,10 @@
 """App Flask em modo webhook — produção (Vercel / Render / qualquer host).
 
-Arquitetura com banco de dados na nuvem (Turso): o mapeamento
+Arquitetura 100% stateless (sem banco de dados): o mapeamento
 cobrança -> usuário viaja dentro do próprio ``external_id`` da Epague
-(``vip2026-{chat_id}-{plan_id}-{rand}``), que o webhook devolve, e a
-assinatura é registrada na tabela `subs` (quem comprou, qual plano,
-quando vence). Os botões consultam a Epague de novo pelo charge_id.
+(``vip2026-{chat_id}-{plan_id}-{rand}``), que o webhook devolve.
+Os botões consultam a Epague de novo pelo charge_id, então nada
+precisa ser persistido em disco.
 
 Endpoints:
   POST /telegram        <- updates do Telegram (configure via setWebhook)
