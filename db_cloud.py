@@ -119,7 +119,7 @@ def _row_to_dict(row) -> dict | None:
 
 
 def init_schema() -> None:
-    """Cria a tabela se não existir. Idempotente."""
+    """Cria as tabelas se não existirem. Idempotente."""
     _one(
         """
         CREATE TABLE IF NOT EXISTS subs (
@@ -132,6 +132,26 @@ def init_schema() -> None:
         )
         """
     )
+    _one(
+        """
+        CREATE TABLE IF NOT EXISTS payments (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          chat_id      INTEGER NOT NULL,
+          plan_id      TEXT NOT NULL,
+          amount_cents INTEGER NOT NULL DEFAULT 0,
+          external_id  TEXT,
+          paid_at      TEXT NOT NULL
+        )
+        """
+    )
+    _one("CREATE INDEX IF NOT EXISTS idx_payments_chat ON payments(chat_id)")
+    _one("CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_ext ON payments(external_id)")
+    # migração idempotente: coluna de avisos de vencimento já enviados ("7,3,1")
+    try:
+        _one("ALTER TABLE subs ADD COLUMN warned_days TEXT NOT NULL DEFAULT ''")
+    except Exception as exc:
+        if "duplicate column" not in str(exc).lower():
+            raise
 
 
 def save_sub(chat_id: int, plan_id: str, expires_at: str | None,
@@ -184,3 +204,66 @@ def list_expired() -> list[dict]:
 
 def deactivate(chat_id: int) -> None:
     _one("UPDATE subs SET active = 0 WHERE chat_id = ?", (chat_id,))
+
+
+def record_payment(chat_id: int, plan_id: str, amount_cents: int,
+                   external_id: str | None) -> None:
+    """Registra uma compra (usado no /status e na idempotência do webhook)."""
+    _one(
+        "INSERT INTO payments (chat_id, plan_id, amount_cents, external_id, paid_at)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (chat_id, plan_id, amount_cents, external_id, _now_iso()),
+    )
+
+
+def payment_exists(external_id: str) -> bool:
+    """Diz se este external_id já foi processado (webhook duplicado)."""
+    if not external_id:
+        return False
+    rows = _one("SELECT id FROM payments WHERE external_id = ? LIMIT 1", (external_id,))
+    return bool(rows)
+
+
+def get_payments(chat_id: int, limit: int = 5) -> list[dict]:
+    """Últimas compras do usuário (mais recentes primeiro)."""
+    rows = _one(
+        "SELECT plan_id, amount_cents, paid_at FROM payments"
+        " WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+        (chat_id, limit),
+    )
+    out = []
+    for r in rows:
+        out.append({
+            "plan_id": _from_hrana_val(r[0]),
+            "amount_cents": _from_hrana_val(r[1]) or 0,
+            "paid_at": _from_hrana_val(r[2]),
+        })
+    return out
+
+
+def list_active_expiring() -> list[dict]:
+    """Assinaturas ativas com prazo definido (base dos avisos de vencimento)."""
+    rows = _one(
+        "SELECT chat_id, plan_id, expires_at, warned_days FROM subs"
+        " WHERE active = 1 AND expires_at IS NOT NULL AND expires_at > ?",
+        (_now_iso(),),
+    )
+    out = []
+    for r in rows:
+        out.append({
+            "chat_id": _from_hrana_val(r[0]),
+            "plan_id": _from_hrana_val(r[1]),
+            "expires_at": _from_hrana_val(r[2]),
+            "warned_days": _from_hrana_val(r[3]) or "",
+        })
+    return out
+
+
+def mark_warned(chat_id: int, day: int) -> None:
+    """Marca o aviso de N dias como enviado (não repete)."""
+    rows = _one("SELECT warned_days FROM subs WHERE chat_id = ?", (chat_id,))
+    current = _from_hrana_val(rows[0][0]) if rows else ""
+    warned = {w for w in str(current or "").split(",") if w}
+    warned.add(str(day))
+    _one("UPDATE subs SET warned_days = ? WHERE chat_id = ?",
+         (",".join(sorted(warned)), chat_id))

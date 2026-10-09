@@ -72,26 +72,47 @@ PAID_STATUSES = {"paid"}
 DEFAULT_PLANS = [
     {
         "id": "semanal",
-        "name": "Plano Semanal",
+        "name": "🗓️ Plano Semanal",
         "price_cents": 999,
         "description": "7 dias de acesso total ao conteúdo VIP",
         "days": 7,
     },
     {
         "id": "mensal",
-        "name": "Plano Mensal",
-        "price_cents": 2199,
+        "name": "📅 Plano Mensal",
+        "price_cents": 1999,
         "description": "30 dias de acesso total ao conteúdo VIP",
         "days": 30,
     },
     {
+        "id": "trimestral",
+        "name": "🔥 Plano Trimestral",
+        "price_cents": 3499,
+        "description": "90 dias de acesso total ao conteúdo VIP",
+        "days": 90,
+    },
+    {
         "id": "vitalicio",
-        "name": "Plano Vitalício",
+        "name": "♾️ Plano Vitalício ⭐",
         "price_cents": 4999,
         "description": "Acesso permanente + todos os bônus",
         "days": 0,
     },
 ]
+
+
+# --- Promoções ---
+# Liga uma promoção temporária (ex: fim de semana 50% OFF, como o CS VIP 2 faz).
+# PROMO_ACTIVE=1 ativa; PROMO_DISCOUNT é a fração (0.5 = 50% OFF, máx 90%);
+# PROMO_NAME é o rótulo exibido ("🔥 ESQUENTA BLACK FRIDAY").
+# Para ativar: definir as 3 vars na Vercel e fazer redeploy.
+PROMO_ACTIVE = os.getenv("PROMO_ACTIVE", "") == "1"
+try:
+    PROMO_DISCOUNT = float(os.getenv("PROMO_DISCOUNT", "0") or 0)
+except ValueError:
+    PROMO_DISCOUNT = 0.0
+PROMO_DISCOUNT = min(max(PROMO_DISCOUNT, 0.0), 0.9)
+PROMO_NAME = os.getenv("PROMO_NAME", "Promoção").strip()
 
 
 def _load_plans():

@@ -50,15 +50,19 @@ _EXTERNAL_ID_RE = re.compile(r"^vip2026-(\d+)-([A-Za-z0-9_]+)-([0-9a-f]+)$")
 PITCH = """\
 👋 Olá, {name}!
 
-🔥 <b>BEM-VINDO(A) À ÁREA VIP!</b> 🔥
+🔥 <b>BEM-VINDO(A) AO VIP 2026</b> 🔥
 
-Aqui você garante acesso ao nosso conteúdo exclusivo, atualizado com frequência.
+Se você já pagou por algum VIP e recebeu menos do que prometeram, sabe bem como é: promessa demais, conteúdo de menos. 😤
 
-✅ Acesso imediato após o pagamento
-✅ Suporte direto no Telegram
-✅ Conteúdo novo com frequência
+Aqui a proposta é simples — entregar <b>mais</b> do que você espera:
 
-👇 <b>Escolha seu plano abaixo:</b>\
+💎 Acervo exclusivo, atualizado todo dia
+⚡ Acesso liberado na hora após o pagamento
+📲 Suporte direto aqui no Telegram
+
+Sem enrolação: escolha o plano, pague o Pix e entre em segundos.
+
+👇 <b>Garanta seu acesso agora:</b>\
 """
 
 PAY_INSTRUCTIONS = """\
@@ -75,10 +79,12 @@ def format_price(cents: int) -> str:
     return f"R$ {cents / 100:.2f}".replace(".", ",")
 
 
-def plans_keyboard() -> dict:
+def plans_keyboard(discount: float = 0.0, prefix: str = "plan") -> dict:
+    def label(p):
+        return f"{p['name']} — {format_price(plan_price_cents(p, discount))}"
+
     return tg.inline_keyboard(
-        [[(f"{p['name']} — {format_price(p['price_cents'])}", f"plan:{p['id']}")]
-         for p in config.PLANS]
+        [[(label(p), f"{prefix}:{p['id']}")] for p in config.PLANS]
     )
 
 
@@ -178,6 +184,7 @@ def webhook_url_for_charge() -> str | None:
 
 def handle_start(chat_id: int, name: str) -> None:
     # /start inteligente: assinante ativo recupera o acesso sem pagar de novo.
+    # Ex-assinante (vencido) recebe oferta de renovação com 10% OFF.
     # Se o banco estiver fora do ar, cai no fluxo normal de planos (vender nunca trava).
     channel_id = (config.VIP_CHANNEL_ID or "").strip()
     if channel_id:
@@ -189,12 +196,28 @@ def handle_start(chat_id: int, name: str) -> None:
         if active_sub:
             _send_recovery_invite(chat_id, name, active_sub, channel_id)
             return
+        try:
+            old_sub = db_cloud.get_sub(chat_id)
+        except Exception:
+            old_sub = None
+            log.exception("Falha ao consultar histórico no /start")
+        if old_sub:
+            tg.send_message(
+                chat_id,
+                f"👋 Olá, {name}!\n\n"
+                "Sua assinatura <b>venceu</b> — mas preparamos uma condição especial:\n"
+                "🔄 Renove agora com <b>10% OFF</b> em qualquer plano 👇\n\n"
+                "<i>Desconto de renovação já aplicado nos preços.</i>",
+                reply_markup=plans_keyboard(discount=RENEW_DISCOUNT, prefix="renew"),
+            )
+            return
     if config.WELCOME_VIDEO:
         try:
             tg.send_video(chat_id, config.WELCOME_VIDEO, caption=f"👋 Olá, {name}!")
         except Exception:
             log.exception("Falha ao enviar vídeo de boas-vindas")
-    tg.send_message(chat_id, PITCH.format(name=name), reply_markup=plans_keyboard())
+    tg.send_message(chat_id, promo_banner() + PITCH.format(name=name),
+                    reply_markup=plans_keyboard(discount=promo_discount()))
 
 
 def _send_recovery_invite(chat_id: int, name: str, sub: dict, channel_id: str) -> None:
@@ -244,43 +267,64 @@ def handle_planos(chat_id: int) -> None:
             f"💎 <b>{p['name']}</b> — {format_price(p['price_cents'])}\n"
             f"{p.get('description', '')}\n<i>{days}</i>"
         )
-    tg.send_message(chat_id, "\n\n".join(lines), reply_markup=plans_keyboard())
+    tg.send_message(chat_id, promo_banner() + "\n\n".join(lines),
+                    reply_markup=plans_keyboard(discount=promo_discount()))
 
 
 def handle_status(chat_id: int, name: str) -> None:
-    """/status — mostra a assinatura atual do usuário (plano e vencimento)."""
+    """/status — assinatura atual + histórico de compras + link do canal."""
     try:
         sub = db_cloud.is_active(chat_id)
     except Exception:
         sub = None
         log.exception("Falha ao consultar assinatura no /status")
+    try:
+        history = db_cloud.get_payments(chat_id, 5)
+    except Exception:
+        history = []
+        log.exception("Falha ao consultar histórico no /status")
+
     if not sub:
-        tg.send_message(
-            chat_id,
+        text = (
             "📊 <b>Minha assinatura</b>\n\n"
             "Você não tem uma assinatura ativa no momento.\n\n"
-            "Use /start para ver os planos. 👋",
+            "Use /start para ver os planos. 👋"
         )
-        return
-    plan = config.PLAN_MAP.get(sub.get("plan_id") or "", {})
-    plan_name = plan.get("name", "VIP")
-    exp = sub.get("expires_at")
-    if exp:
-        try:
-            dt = datetime.fromisoformat(exp)
-            days_left = max(0, (dt - datetime.now(timezone.utc)).days)
-            validity = f"⏳ Vence em <b>{days_left} dia(s)</b>."
-        except Exception:
-            validity = "⏳ Assinatura por tempo limitado."
     else:
-        validity = "♾️ Acesso <b>vitalício</b>."
-    tg.send_message(
-        chat_id,
-        "📊 <b>Minha assinatura</b>\n\n"
-        f"💎 Plano: <b>{plan_name}</b>\n"
-        f"{validity}\n\n"
-        "Perdeu o acesso ao canal? Mande /start que eu gero um link novo. 👍",
-    )
+        plan = config.PLAN_MAP.get(sub.get("plan_id") or "", {})
+        plan_name = plan.get("name", "VIP")
+        exp = sub.get("expires_at")
+        if exp:
+            try:
+                dt = datetime.fromisoformat(exp)
+                days_left = max(0, (dt - datetime.now(timezone.utc)).days)
+                validity = f"⏳ Vence em <b>{days_left} dia(s)</b>."
+            except Exception:
+                validity = "⏳ Assinatura por tempo limitado."
+        else:
+            validity = "♾️ Acesso <b>vitalício</b>."
+        text = (
+            "📊 <b>Minha assinatura</b>\n\n"
+            f"💎 Plano: <b>{plan_name}</b>\n"
+            f"{validity}"
+        )
+        if history:
+            lines = []
+            for h in history:
+                pname = config.PLAN_MAP.get(h.get("plan_id") or "", {}).get("name", h.get("plan_id"))
+                try:
+                    dt = datetime.fromisoformat(h["paid_at"])
+                    when = dt.strftime("%d/%m/%Y")
+                except Exception:
+                    when = ""
+                amt = format_price(h.get("amount_cents") or 0)
+                lines.append(f"• {pname} — {amt} ({when})".strip())
+            text += "\n\n📜 <b>Últimas compras:</b>\n" + "\n".join(lines)
+        link = (config.VIP_INVITE_LINK or "").strip()
+        if link:
+            text += f"\n\n👉 <b>Canal VIP:</b> {link}"
+        text += "\n\nPerdeu o acesso ao canal? Mande /start que eu gero um link novo. 👍"
+    tg.send_message(chat_id, text)
 
 
 def handle_suporte(chat_id: int, name: str) -> None:
@@ -302,7 +346,33 @@ def handle_suporte(chat_id: int, name: str) -> None:
         )
 
 
-def handle_plan(chat_id: int, plan_id: str, callback_id: str) -> None:
+def plan_price_cents(plan: dict, discount: float = 0.0) -> int:
+    """Preço final em centavos aplicando desconto (0.0 a 1.0)."""
+    return max(1, round(plan["price_cents"] * (1 - discount)))
+
+
+# Desconto de renovação para ex-assinantes (igual ao Baby Shark: 10% OFF).
+RENEW_DISCOUNT = 0.10
+
+
+def promo_discount() -> float:
+    """Desconto da promoção ativa (0.0 se não houver)."""
+    return config.PROMO_DISCOUNT if config.PROMO_ACTIVE else 0.0
+
+
+def promo_label() -> str:
+    return config.PROMO_NAME if config.PROMO_ACTIVE and config.PROMO_DISCOUNT else ""
+
+
+def promo_banner() -> str:
+    if not config.PROMO_ACTIVE or not config.PROMO_DISCOUNT:
+        return ""
+    pct = int(round(config.PROMO_DISCOUNT * 100))
+    return f"🔥 <b>{config.PROMO_NAME}</b> — {pct}% OFF em todos os planos! 🔥\n\n"
+
+
+def handle_plan(chat_id: int, plan_id: str, callback_id: str, discount: float = 0.0,
+                discount_label: str = "") -> None:
     tg.answer_callback(callback_id)
     plan = config.PLAN_MAP.get(plan_id)
     if not plan:
@@ -312,10 +382,14 @@ def handle_plan(chat_id: int, plan_id: str, callback_id: str) -> None:
     tg.send_message(chat_id, "Gerando seu Pix, um instante... ⏳")
     try:
         external_id = f"vip2026-{chat_id}-{plan_id}-{uuid.uuid4().hex[:8]}"
+        final_cents = plan_price_cents(plan, discount)
+        desc = f"VIP 2026 - {plan['name']}"
+        if discount_label:
+            desc += f" ({discount_label})"
         charge = epague_client().create_charge(
-            plan["price_cents"] / 100,
+            final_cents / 100,
             external_id=external_id,
-            description=f"VIP 2026 - {plan['name']}",
+            description=desc,
             webhook_url=webhook_url_for_charge(),
         )
     except EpagueError:
@@ -327,13 +401,16 @@ def handle_plan(chat_id: int, plan_id: str, callback_id: str) -> None:
     qr_code = charge["pix_copia_cola"]
     qr_b64 = charge.get("qr_code_base64", "")
 
+    summary = f"⭐ Você escolheu: <b>{plan['name']}</b> — {format_price(final_cents)}"
+    if discount_label:
+        summary += f"\n<i>🎁 {discount_label} aplicado!</i>"
     if qr_b64:
         try:
             raw = qr_b64.split(",", 1)[-1]  # remove "data:image/png;base64," se houver
             tg.send_photo(chat_id, base64.b64decode(raw), "Escaneie o QR Code para pagar 📱")
         except Exception:
             log.exception("Falha ao enviar QR Code")
-    tg.send_message(chat_id, PAY_INSTRUCTIONS)
+    tg.send_message(chat_id, summary + "\n\n" + PAY_INSTRUCTIONS)
     tg.send_message(chat_id, f"Copie o código abaixo:\n\n<code>{qr_code}</code>")
     tg.send_message(
         chat_id,
@@ -415,7 +492,11 @@ def telegram_webhook():
         chat_id = cq["message"]["chat"]["id"]
         data = cq.get("data", "")
         if data.startswith("plan:"):
-            handle_plan(chat_id, data.split(":", 1)[1], callback_id)
+            handle_plan(chat_id, data.split(":", 1)[1], callback_id,
+                        discount=promo_discount(), discount_label=promo_label())
+        elif data.startswith("renew:"):
+            handle_plan(chat_id, data.split(":", 1)[1], callback_id,
+                        discount=RENEW_DISCOUNT, discount_label="desconto de renovação 10% OFF")
         elif data.startswith("v:"):
             handle_verify(chat_id, data.split(":", 1)[1], callback_id)
         elif data.startswith("c:"):
@@ -478,12 +559,74 @@ def epague_webhook():
         return jsonify({"ok": False, "error": "external_id inválido"}), 400
 
     if status in config.PAID_STATUSES:
+        external_id = payload.get("external_id", "") or ""
+        try:
+            if external_id and db_cloud.payment_exists(external_id):
+                log.info("Webhook duplicado ignorado: %s", external_id)
+                return jsonify({"ok": True, "duplicate": True})
+        except Exception:
+            log.exception("Falha ao checar duplicidade (seguindo com liberação)")
         try:
             release_access(chat_id, plan_id or "")
+            try:
+                db_cloud.init_schema()
+                amount = payload.get("amount") or payload.get("value") or 0
+                try:
+                    amount_cents = int(round(float(amount) * 100))
+                except (TypeError, ValueError):
+                    amount_cents = 0
+                if not amount_cents:
+                    amount_cents = config.PLAN_MAP.get(plan_id or "", {}).get("price_cents", 0)
+                db_cloud.record_payment(chat_id, plan_id or "", amount_cents, external_id or None)
+            except Exception:
+                log.exception("Falha ao registrar pagamento (acesso já liberado)")
         except Exception:
             log.exception("Falha ao liberar acesso no Telegram")
 
     return jsonify({"ok": True})
+
+
+def send_expiry_warnings() -> dict:
+    """Avisos de vencimento (7, 3 e 1 dia antes), como o Baby Shark faz.
+
+    Roda no cron diário antes da faxina. Cada marco é avisado uma única vez
+    (coluna warned_days); o texto já empurra pra renovação com 10% OFF.
+    """
+    import math
+
+    try:
+        subs = db_cloud.list_active_expiring()
+    except Exception:
+        log.exception("Falha ao buscar assinaturas a vencer")
+        return {"warned": 0, "failed": ["db_error"]}
+
+    now = datetime.now(timezone.utc)
+    warned, failed = 0, []
+    for sub in subs:
+        try:
+            exp = datetime.fromisoformat(sub["expires_at"])
+        except Exception:
+            continue
+        days_left = math.ceil((exp - now).total_seconds() / 86400)
+        if days_left not in (7, 3, 1):
+            continue
+        already = {w for w in str(sub.get("warned_days") or "").split(",") if w}
+        if str(days_left) in already:
+            continue
+        when = "amanhã" if days_left == 1 else f"em {days_left} dias"
+        try:
+            tg.send_message(
+                sub["chat_id"],
+                "⏳ <b>Seu VIP 2026 vence " + when + "!</b>\n\n"
+                "Não fique de fora — quando vencer, mande /start aqui "
+                "e renove com <b>10% OFF</b>. 🔄",
+            )
+            db_cloud.mark_warned(sub["chat_id"], days_left)
+            warned += 1
+        except Exception:
+            log.exception(f"Falha ao avisar vencimento de {sub['chat_id']}")
+            failed.append(sub["chat_id"])
+    return {"warned": warned, "failed": failed}
 
 
 def expire_subscriptions() -> dict:
@@ -545,8 +688,9 @@ def cron_expire():
     expected = (config.CRON_SECRET or "").strip()
     if not expected or request.headers.get("Authorization") != f"Bearer {expected}":
         return jsonify({"ok": False, "error": "unauthorized"}), 401
+    warnings = send_expiry_warnings()
     result = expire_subscriptions()
-    return jsonify({"ok": True, **result})
+    return jsonify({"ok": True, "warnings": warnings, **result})
 
 
 if __name__ == "__main__":
