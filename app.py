@@ -850,6 +850,55 @@ def health():
     return jsonify({"ok": True})
 
 
+def _check_admin() -> bool:
+    expected = (config.CRON_SECRET or "").strip()
+    return bool(expected) and request.headers.get("Authorization") == f"Bearer {expected}"
+
+
+@app.get("/admin/users")
+def admin_users():
+    """Lista visitantes recentes (base das campanhas). Protegido por Bearer."""
+    if not _check_admin():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    try:
+        db_cloud.init_schema()
+        users = db_cloud.list_users(limit=50)
+    except Exception:
+        log.exception("Falha ao listar usuários")
+        return jsonify({"ok": False, "error": "db_error"}), 500
+    return jsonify({"ok": True, "users": users})
+
+
+@app.post("/admin/grant")
+def admin_grant():
+    """Concede VIP cortesia: {"chat_id": 123, "plan_id": "mensal"}.
+
+    Útil pra testes e cortesias. Protegido por Bearer.
+    """
+    if not _check_admin():
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        chat_id = int(data.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        chat_id = 0
+    plan_id = str(data.get("plan_id") or "mensal")
+    plan = config.PLAN_MAP.get(plan_id)
+    if not chat_id or not plan:
+        return jsonify({"ok": False, "error": "chat_id e plan_id válidos são obrigatórios"}), 400
+    try:
+        db_cloud.init_schema()
+        db_cloud.save_sub(chat_id, plan_id, plan_expires_at(plan_id), None)
+        # registra como compra (cortesia) pra aparecer no /status
+        ext = f"cortesia-{chat_id}-{plan_id}"
+        if not db_cloud.payment_exists(ext):
+            db_cloud.record_payment(chat_id, plan_id, plan["price_cents"], ext)
+    except Exception:
+        log.exception("Falha ao conceder cortesia")
+        return jsonify({"ok": False, "error": "db_error"}), 500
+    return jsonify({"ok": True, "chat_id": chat_id, "plan_id": plan_id})
+
+
 @app.get("/cron/expire")
 def cron_expire():
     """Endpoint do cron diário da Vercel. Protegido por CRON_SECRET

@@ -319,3 +319,18 @@ def mark_nudged(chat_id: int) -> None:
 def mark_unreachable(chat_id: int) -> None:
     """Bot bloqueado ou chat inválido: para de tentar."""
     _one("UPDATE users SET reachable = 0 WHERE chat_id = ?", (chat_id,))
+
+
+def list_users(limit: int = 50) -> list[dict]:
+    """Visitantes mais recentes (área admin)."""
+    rows = _one(
+        "SELECT chat_id, first_name, first_seen, last_seen, nudge_count, reachable"
+        " FROM users ORDER BY last_seen DESC LIMIT ?",
+        (limit,),
+    )
+    # nota: _pipeline já converte os valores; não converter de novo
+    return [
+        {"chat_id": r[0], "first_name": r[1] or "", "first_seen": r[2],
+         "last_seen": r[3], "nudge_count": r[4] or 0, "reachable": r[5]}
+        for r in rows
+    ]
