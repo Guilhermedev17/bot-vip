@@ -572,20 +572,22 @@ def epague_webhook():
             log.exception("Falha ao checar duplicidade (seguindo com liberação)")
         try:
             release_access(chat_id, plan_id or "")
-            try:
-                db_cloud.init_schema()
-                amount = payload.get("amount") or payload.get("value") or 0
-                try:
-                    amount_cents = int(round(float(amount) * 100))
-                except (TypeError, ValueError):
-                    amount_cents = 0
-                if not amount_cents:
-                    amount_cents = config.PLAN_MAP.get(plan_id or "", {}).get("price_cents", 0)
-                db_cloud.record_payment(chat_id, plan_id or "", amount_cents, external_id or None)
-            except Exception:
-                log.exception("Falha ao registrar pagamento (acesso já liberado)")
         except Exception:
             log.exception("Falha ao liberar acesso no Telegram")
+        # registra a compra de forma independente do envio da mensagem
+        # (idempotência do webhook + histórico do /status)
+        try:
+            db_cloud.init_schema()
+            amount = payload.get("amount") or payload.get("value") or 0
+            try:
+                amount_cents = int(round(float(amount) * 100))
+            except (TypeError, ValueError):
+                amount_cents = 0
+            if not amount_cents:
+                amount_cents = config.PLAN_MAP.get(plan_id or "", {}).get("price_cents", 0)
+            db_cloud.record_payment(chat_id, plan_id or "", amount_cents, external_id or None)
+        except Exception:
+            log.exception("Falha ao registrar pagamento")
 
     return jsonify({"ok": True})
 
